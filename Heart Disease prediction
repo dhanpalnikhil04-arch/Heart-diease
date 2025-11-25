@@ -1,0 +1,168 @@
+import numpy as np
+import streamlit as st
+from sklearn.linear_model import LogisticRegression
+import smtplib
+from email.message import EmailMessage
+from fpdf import FPDF
+
+# --- Dummy Model Training (REPLACE with real model in production) ---
+X_dummy = np.array([
+    [38, 1, 0, 130, 150, 0, 0, 80, 0, 2.0, 0, 0, 0],
+    [55, 0, 2, 120, 235, 1, 1, 142, 1, 1.8, 2, 1, 2],
+    [65, 1, 3, 140, 210, 1, 2, 190, 1, 3.2, 1, 2, 1]
+])
+y_dummy = np.array([0,1,1])
+model = LogisticRegression(max_iter=200)
+model.fit(X_dummy, y_dummy)
+
+# --- Streamlit UI ---
+st.set_page_config(page_title="Heart Disease Predictor", layout="wide")
+
+# Doctor icons
+col1, col2, col3 = st.columns([1,2,1])
+with col1:
+    st.image("https://img.freepik.com/free-vector/doctor-character-background_1270-84.jpg", width=120)
+with col2:
+    st.markdown(
+        "<h1 style='text-align: center; font-size: 38px;'>Heart Disease Predictor Using Machine Learning</h1>",
+        unsafe_allow_html=True
+    )
+with col3:
+    st.image("https://img.freepik.com/free-vector/doctor-character-background_1270-84.jpg", width=120)
+st.write("---")
+
+# --- Input form ---
+with st.form("user_form"):
+    name = st.text_input("👤 Name", value="Mahesh")
+    email = st.text_input("📧 Email", value="vtupulse@gmail.com")
+
+    st.subheader("📝 Patient Medical Inputs")
+    c1, c2 = st.columns(2)
+    with c1:
+        age = st.number_input("Age", min_value=1, max_value=120, value=38)
+        sex = st.selectbox("Gender", ["Male", "Female"])
+        cp = st.selectbox("Chest Pain Types", [0, 1, 2, 3])
+        trestbps = st.number_input("Resting Blood Pressure (mm/Hg)", value=130)
+        chol = st.number_input("Cholesterol Level", value=150)
+        fbs = st.selectbox("Is Fasting Blood Sugar > 120 mg/dL?", [0, 1])
+    with c2:
+        restecg = st.selectbox("Resting ECG", ["Normal", "ST-T wave abnormality", "Left ventricular hypertrophy"])
+        thalach = st.number_input("Maximum Heart Rate Achieved", value=80)
+        exang = st.selectbox("Exercise Induced Angina?", [0, 1])
+        oldpeak = st.number_input("Old Peak", value=2.0)
+        slope = st.selectbox("Slope of ST Segment", [0, 1, 2])
+        ca = st.selectbox("Number of major vessels (0-3)", [0, 1, 2, 3])
+        thal = st.selectbox("Thal Type", ["Normal", "Fixed Defect", "Reversible Defect"])
+
+    st.subheader("📷 Capture Patient Image")
+    img_file_buffer = st.camera_input("Take a picture")
+    submitted = st.form_submit_button("🔍 Predict")
+
+# --- Prediction & Report ---
+if submitted:
+    # Encode categorical features
+    sex_val = 1 if sex == "Male" else 0
+    restecg_val = {"Normal": 0, "ST-T wave abnormality": 1, "Left ventricular hypertrophy": 2}[restecg]
+    thal_val = {"Normal": 0, "Fixed Defect": 1, "Reversible Defect": 2}[thal]
+
+    input_data = np.array([
+        age, sex_val, cp, trestbps, chol, fbs, restecg_val,
+        thalach, exang, oldpeak, slope, ca, thal_val
+    ]).reshape(1, -1)
+
+    prediction_proba = model.predict_proba(input_data)[0][1]
+    prediction = model.predict(input_data)[0]
+
+    st.write("---")
+    st.header(f"{name}")
+    st.write(f"📧 **{email.upper()}**")
+
+    data_dict = {
+        "Age": age, "Gender": sex, "Chest Pain Types": cp, "Resting Blood Pressure": trestbps,
+        "Cholesterol Level": chol, "Fasting Blood Sugar > 120 mg/dL": fbs,
+        "Resting ECG": restecg, "Maximum Heart Rate Achieved": thalach,
+        "Exercise Induced Angina": exang, "Old Peak": oldpeak,
+        "Slope of ST Segment": slope, "Major Vessels (0-3)": ca, "Thal Type": thal
+    }
+    st.table([[k, v] for k, v in data_dict.items()])
+    st.markdown(f"### 🧾 Overall Result: **{prediction_proba*100:.1f}%** chance of heart disease")
+
+    result_text = "🩺 No heart disease detected." if prediction == 0 else "❗ Heart disease detected!"
+    if prediction == 0:
+        st.success(result_text)
+    else:
+        st.error(result_text)
+
+    # Save image
+    image_path = None
+    if img_file_buffer:
+        image_path = "patient_image.jpg"
+        with open(image_path, "wb") as f:
+            f.write(img_file_buffer.getbuffer())
+        st.image(img_file_buffer, caption="Captured Image", use_column_width=True)
+
+    # Generate PDF report
+    def remove_emojis(text):
+        return text.encode("ascii", "ignore").decode("ascii")
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(200, 10, txt="Heart Disease Prediction Report", ln=True, align='C')
+    pdf.set_font("Arial", size=12)
+    pdf.ln(10)
+    pdf.cell(200, 10, txt=f"Patient Name: {remove_emojis(name)}", ln=True)
+    pdf.cell(200, 10, txt=f"Email: {remove_emojis(email)}", ln=True)
+    pdf.cell(200, 10, txt=f"Prediction Chance: {prediction_proba*100:.1f}%", ln=True)
+    pdf.multi_cell(0, 10, txt=f"Result: {remove_emojis(result_text)}")
+    pdf.ln(5)
+    pdf.cell(200, 10, txt="Entered Medical Values:", ln=True)
+    for key, value in data_dict.items():
+        pdf.cell(200, 8, txt=f"- {remove_emojis(str(key))}: {remove_emojis(str(value))}", ln=True)
+    if image_path:
+        pdf.ln(5)
+        pdf.image(image_path, x=10, w=80)
+    pdf_path = "heart_report.pdf"
+    pdf.output(pdf_path)
+    st.success("📄 PDF Report Generated!")
+    with open(pdf_path, "rb") as f:
+        st.download_button("📥 Download Report (PDF)", f, "heart_disease_report.pdf", "application/pdf")
+
+    # Send Email (TLS Port 587)
+    sender_email = "nikhildhanpal03@gmail.com"
+    sender_password = "guyzaveafatrmert"  # Use Gmail App Password
+    msg = EmailMessage()
+    msg['Subject'] = "🧠 Heart Disease Prediction Result"
+    msg['From'] = sender_email
+    msg['To'] = email
+    msg.set_content(f"""
+Hi {name},
+
+Here is your heart disease prediction result:
+please take care yourself!!
+Prediction Chance: {prediction_proba*100:.1f}%
+Result: {result_text}
+
+Details:
+{[str(k)+': '+str(v) for k,v in data_dict.items()]}
+
+Regards,
+Heart Disease Predictor App
+    """)
+    # Attach PDF
+    with open(pdf_path, "rb") as f:
+        msg.add_attachment(f.read(), maintype="application", subtype="pdf", filename="heart_disease_report.pdf")
+    # Attach image if exists
+    if image_path:
+        with open(image_path, "rb") as img:
+            msg.add_attachment(img.read(), maintype="image", subtype="jpeg", filename="patient_image.jpg")
+    try:
+        with smtplib.SMTP('smtp.gmail.com', 587) as smtp:
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.login(sender_email, sender_password)
+            smtp.send_message(msg)
+        st.success("✅ Email with PDF and image sent successfully!")
+    except smtplib.SMTPAuthenticationError:
+        st.error("❌ Authentication failed! Use a Gmail App Password.")
+    except Exception as e:
+        st.error(f"⚠️ Failed to send email: {e}")
