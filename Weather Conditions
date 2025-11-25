@@ -1,0 +1,42 @@
+import streamlit as st
+import requests
+
+st.set_page_config(page_title="🌦️ Weather App", page_icon="☀️")
+st.title("📍 Weather Conditions")
+
+api_key = "318447a2fc38d3d2393c02f632c80dee"  # Replace with your actual API key
+city = st.text_input("Enter city name:")
+
+if st.button("Get Weather"):
+    if city:
+        url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric"
+        response = requests.get(url).json()
+
+        if response.get("cod") != 200:
+            st.error(f"City not found: {response.get('message', 'Unknown error')}")
+        else:
+            condition = response["weather"][0]["main"]
+            description = response["weather"][0]["description"].capitalize()
+            temp = response["main"]["temp"]
+            icon_code = response["weather"][0]["icon"]
+            icon_url = f"http://openweathermap.org/img/wn/{icon_code}@2x.png"
+
+            # Emoji based on condition
+            if "Cloud" in condition:
+                emoji = "☁️"
+            elif "Rain" in condition:
+                emoji = "🌧️"
+            elif "Clear" in condition:
+                emoji = "☀️"
+            elif "Snow" in condition:
+                emoji = "❄️"
+            elif "Thunderstorm" in condition:
+                emoji = "⛈️"
+            else:
+                emoji = "🌡️"
+
+            st.image(icon_url)
+            st.markdown(f"## {emoji} {city.title()} Weather")
+            st.markdown(f"### {description}, {temp} °C")
+    else:
+        st.warning("Please enter a city name")
