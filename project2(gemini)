@@ -1,0 +1,1154 @@
+import numpy as np
+import streamlit as st
+import streamlit.components.v1 as components
+from sklearn.linear_model import LogisticRegression
+import smtplib
+from email.message import EmailMessage
+from fpdf import FPDF
+from gtts import gTTS
+import google.generativeai as genai  # CORRECT: Only Gemini, no OpenAI
+import speech_recognition as sr
+from pydub import AudioSegment
+import hashlib
+from datetime import datetime
+
+# =========================
+# CONFIG
+# =========================
+GEMINI_API_KEY = "AIzaSyAYAvsjMu9riQi5eEnYJiPU0IyATMwCDDI"  # Get from https://aistudio.google.com/app/apikey
+
+# Configure Gemini with explicit settings
+try:
+    genai.configure(api_key=GEMINI_API_KEY)
+    # Test the API key immediately
+    print("Testing Gemini API key...")
+    test_models = list(genai.list_models())
+    print(f"✅ API key valid! Found {len(test_models)} models")
+except Exception as e:
+    print(f"⚠️ Gemini API Configuration Error: {e}")
+    print("The app will work but AI voice assistant will be disabled.")
+
+SENDER_EMAIL = "nikhildhanpal03@gmail.com"
+SENDER_APP_PASSWORD = "guyzaveafatrmert"
+
+# =========================
+# USER DATABASE (Simple)
+# =========================
+USERS_DB = {
+    "admin": hashlib.sha256("admin123".encode()).hexdigest(),
+    "doctor": hashlib.sha256("doctor123".encode()).hexdigest(),
+    "user": hashlib.sha256("user123".encode()).hexdigest(),
+}
+
+# =========================
+# SESSION STATE INIT
+# =========================
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "username" not in st.session_state:
+    st.session_state.username = ""
+if "predicted" not in st.session_state:
+    st.session_state.predicted = False
+if "prediction_history" not in st.session_state:
+    st.session_state.prediction_history = []
+if "user_location" not in st.session_state:
+    st.session_state.user_location = None
+if "emergency_triggered" not in st.session_state:
+    st.session_state.emergency_triggered = False
+
+# ============================================
+# NEW: Role selection state ("patient"/"doctor"/None)
+# ============================================
+if "selected_role" not in st.session_state:
+    st.session_state.selected_role = None
+
+# Appointment booking state
+if "booking_doctor_idx" not in st.session_state:
+    st.session_state.booking_doctor_idx = None
+if "appointments" not in st.session_state:
+    st.session_state.appointments = []
+
+# =========================
+# EMERGENCY DOCTOR DATABASE
+# =========================
+EMERGENCY_DOCTORS = [
+    {
+        "name": "Dr. Rajesh Kumar",
+        "specialization": "Cardiologist",
+        "hospital": "City Heart Institute",
+        "phone": "+91-9876543210",
+        "email": "dr.rajesh@cityheart.com",
+        "address": "123 MG Road, Bangalore",
+        "availability": "24/7 Emergency",
+        "maps_link": "https://maps.google.com/?q=12.9716,77.5946"
+    },
+    {
+        "name": "Dr. Priya Sharma",
+        "specialization": "Cardiac Surgeon",
+        "hospital": "Apollo Hospitals",
+        "phone": "+91-9876543211",
+        "email": "dr.priya@apollo.com",
+        "address": "456 Ring Road, Hyderabad",
+        "availability": "24/7 Emergency",
+        "maps_link": "https://maps.google.com/?q=17.3850,78.4867"
+    },
+    {
+        "name": "Dr. Amit Patel",
+        "specialization": "Interventional Cardiologist",
+        "hospital": "Max Healthcare",
+        "phone": "+91-9876543212",
+        "email": "dr.amit@maxhealthcare.com",
+        "address": "789 Sector 14, Delhi",
+        "availability": "24/7 Emergency",
+        "maps_link": "https://maps.google.com/?q=28.7041,77.1025"
+    },
+    {
+        "name": "Dr. Sunita Reddy",
+        "specialization": "Cardiologist",
+        "hospital": "Fortis Hospital",
+        "phone": "+91-9876543213",
+        "email": "dr.sunita@fortis.com",
+        "address": "321 Park Street, Mumbai",
+        "availability": "Mon-Sat: 9 AM - 6 PM",
+        "maps_link": "https://maps.google.com/?q=19.0760,72.8777"
+    }
+]
+
+# =========================
+# HIDE STREAMLIT UI ELEMENTS
+# =========================
+hide_streamlit_style = """
+    <style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    .stDeployButton {display:none;}
+    .viewerBadge_container__1QSob {display: none;}
+    .styles_viewerBadge__1yB5_ {display: none;}
+    div[data-testid="stToolbar"] {display: none;}
+    div[data-testid="stDecoration"] {display: none;}
+    div[data-testid="stStatusWidget"] {display: none;}
+    </style>
+"""
+
+
+# =========================
+# UNICODE SAFE FUNCTION
+# =========================
+def clean_text(text):
+    return text.encode("ascii", "ignore").decode("ascii")
+
+
+# =========================
+# MODEL
+# =========================
+X_dummy = np.array([
+    [38, 1, 0, 130, 150, 0, 0, 80, 0, 2.0, 0, 0, 0],
+    [55, 0, 2, 120, 235, 1, 1, 142, 1, 1.8, 2, 1, 2],
+    [65, 1, 3, 140, 210, 1, 2, 190, 1, 3.2, 1, 2, 1]
+])
+y_dummy = np.array([0, 1, 1])
+
+ml_model = LogisticRegression(max_iter=200)  # FIXED: Renamed to ml_model to avoid conflict
+ml_model.fit(X_dummy, y_dummy)
+
+
+# =========================
+# LOGIN PAGE
+# =========================
+def login_page():
+    st.set_page_config(page_title="Heart Disease Predictor - Login", layout="centered")
+    st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown(
+            "<h1 style='text-align:center;color:#FF6B6B;'>🫀 Heart Disease Predictor</h1>",
+            unsafe_allow_html=True
+        )
+        st.markdown(
+            "<h3 style='text-align:center;color:#4ECDC4;'>Login to Continue</h3>",
+            unsafe_allow_html=True
+        )
+
+        st.write("")
+
+        with st.form("login_form"):
+            username = st.text_input("👤 Username", placeholder="Enter your username")
+            password = st.text_input("🔒 Password", type="password", placeholder="Enter your password")
+
+            col_a, col_b, col_c = st.columns([1, 1, 1])
+            with col_b:
+                login_btn = st.form_submit_button("🔐 Login", use_container_width=True)
+
+            if login_btn:
+                hashed_password = hashlib.sha256(password.encode()).hexdigest()
+
+                if username in USERS_DB and USERS_DB[username] == hashed_password:
+                    st.session_state.logged_in = True
+                    st.session_state.username = username
+                    st.session_state.selected_role = None  # Reset role on new login
+                    st.success(f"✅ Welcome, {username}!")
+                    st.rerun()
+                else:
+                    st.error("❌ Invalid username or password")
+
+        st.write("---")
+        st.info(
+            "📌 **Demo Credentials:**\n- Username: `admin` | Password: `admin123`\n- Username: `doctor` | Password: `doctor123`\n- Username: `user` | Password: `user123`")
+
+
+# =========================
+# NEW: ROLE SELECTION PAGE
+# =========================
+def role_selection_page():
+    st.set_page_config(page_title="Heart Disease Predictor - Select Role", layout="centered")
+    st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
+    st.markdown(
+        "<h1 style='text-align:center;color:#FF6B6B;'>🫀 Heart Disease Predictor</h1>",
+        unsafe_allow_html=True
+    )
+    st.markdown(
+        f"<h4 style='text-align:center;color:#4ECDC4;'>Welcome, {st.session_state.username}! Please select your role.</h4>",
+        unsafe_allow_html=True
+    )
+
+    st.write("")
+    st.write("")
+
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("""
+        <style>
+        .role-btn-container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            margin-top: 10px;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+        st.write("### 👇 Choose how you want to continue:")
+        st.write("")
+
+        # Patient Button
+        if st.button("🧑‍⚕️  I am a Patient", use_container_width=True, key="btn_patient"):
+            st.session_state.selected_role = "patient"
+            st.rerun()
+
+        st.write("")
+
+        # Doctor Button
+        if st.button("🩺  I am a Doctor", use_container_width=True, key="btn_doctor"):
+            st.session_state.selected_role = "doctor"
+            st.rerun()
+
+        st.write("")
+        st.write("---")
+
+        if st.button("🚪 Logout", use_container_width=True, key="btn_logout_role"):
+            st.session_state.logged_in = False
+            st.session_state.username = ""
+            st.session_state.selected_role = None
+            st.rerun()
+
+
+# =========================
+# DOCTOR PANEL PAGE (Emergency Doctor Details)
+# =========================
+def doctor_panel_page():
+    st.set_page_config(page_title="Doctor Panel - Emergency Contacts", layout="wide")
+    st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
+    # Header
+    st.markdown("<h1 style='text-align:center;color:#FF6B6B;'>🩺 Doctor Panel</h1>", unsafe_allow_html=True)
+    st.markdown("<h4 style='text-align:center;color:#4ECDC4;'>Emergency Cardiac Specialists Directory</h4>",
+                unsafe_allow_html=True)
+
+    col_left, col_right = st.columns([4, 1])
+    with col_left:
+        st.markdown(f"**👋 Logged in as: {st.session_state.username}** | 🩺 Doctor View")
+    with col_right:
+        if st.button("⬅️ Back", use_container_width=True, key="doctor_back"):
+            st.session_state.selected_role = None
+            st.rerun()
+
+    st.write("---")
+
+    # Summary stats
+    st.subheader("📊 Emergency Network Overview")
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("Total Specialists", len(EMERGENCY_DOCTORS))
+    with m2:
+        always_available = sum(1 for d in EMERGENCY_DOCTORS if "24/7" in d["availability"])
+        st.metric("24/7 Available", always_available)
+    with m3:
+        hospitals = len(set(d["hospital"] for d in EMERGENCY_DOCTORS))
+        st.metric("Hospitals", hospitals)
+    with m4:
+        cities = len(set(d["address"].split(",")[-1].strip() for d in EMERGENCY_DOCTORS))
+        st.metric("Cities Covered", cities)
+
+    st.write("---")
+    st.subheader("🏥 Emergency Cardiac Specialists")
+
+    # ---- Booking form state check ----
+    # Show booking form if a doctor was selected
+    if st.session_state.booking_doctor_idx is not None:
+        selected_doc = EMERGENCY_DOCTORS[st.session_state.booking_doctor_idx]
+        st.success(
+            f"📅 Booking appointment with **{selected_doc['name']}** — {selected_doc['specialization']}, {selected_doc['hospital']}")
+        st.write("")
+
+        with st.form("appointment_form"):
+            af_col1, af_col2 = st.columns(2)
+            with af_col1:
+                patient_name = st.text_input("👤 Patient Name", placeholder="Full name")
+                patient_phone = st.text_input("📞 Patient Phone", placeholder="+91-XXXXXXXXXX")
+                appt_date = st.date_input("📅 Preferred Date")
+            with af_col2:
+                patient_email = st.text_input("📧 Patient Email", placeholder="email@example.com")
+                appt_time = st.selectbox("🕐 Preferred Time Slot", [
+                    "12:00 AM (Midnight)", "06:00 AM", "08:00 AM",
+                    "10:00 AM", "12:00 PM", "02:00 PM",
+                    "04:00 PM", "06:00 PM", "08:00 PM", "10:00 PM"
+                ])
+                reason = st.text_area("📋 Reason / Symptoms", placeholder="Describe emergency or symptoms", height=100)
+
+            confirm_btn = st.form_submit_button("✅ Confirm Booking", use_container_width=True)
+            cancel_btn = st.form_submit_button("❌ Cancel", use_container_width=True)
+
+            if cancel_btn:
+                st.session_state.booking_doctor_idx = None
+                st.rerun()
+
+            if confirm_btn:
+                if not patient_name or not patient_phone or not patient_email:
+                    st.error("❌ Please fill in Name, Phone and Email.")
+                else:
+                    appt_id = f"APT{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                    st.session_state.appointments.append({
+                        "id": appt_id,
+                        "doctor": selected_doc["name"],
+                        "specialization": selected_doc["specialization"],
+                        "hospital": selected_doc["hospital"],
+                        "doctor_phone": selected_doc["phone"],
+                        "patient_name": patient_name,
+                        "patient_phone": patient_phone,
+                        "patient_email": patient_email,
+                        "date": str(appt_date),
+                        "time": appt_time,
+                        "reason": reason,
+                        "booked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "status": "Confirmed"
+                    })
+                    try:
+                        appt_msg = EmailMessage()
+                        appt_msg["Subject"] = f"Appointment Confirmed - {selected_doc['name']} | {appt_id}"
+                        appt_msg["From"] = SENDER_EMAIL
+                        appt_msg["To"] = patient_email
+                        appt_msg.set_content(clean_text(
+                            f"Dear {patient_name},\n\nAppointment confirmed!\n"
+                            f"ID: {appt_id}\nDoctor: {selected_doc['name']}\n"
+                            f"Hospital: {selected_doc['hospital']}\nDate: {appt_date} at {appt_time}\n"
+                            f"Reason: {reason or 'Not specified'}\n\nArrive 10 mins early.\n"
+                            f"Emergency: Call 108\n\nHeart Disease Predictor System"
+                        ))
+                        with smtplib.SMTP("smtp.gmail.com", 587) as smtp:
+                            smtp.starttls()
+                            smtp.login(SENDER_EMAIL, SENDER_APP_PASSWORD)
+                            smtp.send_message(appt_msg)
+                        email_ok = True
+                    except Exception:
+                        email_ok = False
+
+                    st.session_state.booking_doctor_idx = None
+                    st.success(
+                        f"🎉 Appointment {appt_id} booked with {selected_doc['name']} on {appt_date} at {appt_time}!")
+                    if email_ok:
+                        st.info(f"📧 Confirmation email sent to {patient_email}")
+                    else:
+                        st.warning("⚠️ Email could not be sent, but appointment is saved.")
+                    st.rerun()
+
+        st.write("---")
+
+    # ---- Doctor cards with real Book buttons ----
+    for idx, doctor in enumerate(EMERGENCY_DOCTORS):
+        is_247 = "24/7" in doctor["availability"]
+        color = "#28a745" if is_247 else "#ffc107"
+        icon = "🟢" if is_247 else "🟡"
+
+        st.markdown(f"### {icon} {doctor['name']} — {doctor['specialization']}")
+        st.write(
+            f"🏥 **Hospital:** {doctor['hospital']}   |   📞 **Phone:** {doctor['phone']}   |   📧 **Email:** {doctor['email']}")
+        st.write(f"📍 **Address:** {doctor['address']}   |   ⏰ **Availability:** {doctor['availability']}")
+        st.markdown(f"[🗺️ View on Google Maps]({doctor['maps_link']})")
+
+        if is_247:
+            if st.button(f"📅 Book Appointment — {doctor['name']}", key=f"book_{idx}"):
+                st.session_state.booking_doctor_idx = idx
+                st.rerun()
+        else:
+            st.info("🕐 Scheduled Hours Only — Booking not available")
+
+        st.divider()
+
+    # ---- Booked appointments list ----
+    if st.session_state.appointments:
+        st.subheader("📋 Booked Appointments (This Session)")
+        for appt in reversed(st.session_state.appointments):
+            with st.expander(
+                    f"✅ [{appt['id']}] {appt['patient_name']} → {appt['doctor']} | {appt['date']} {appt['time']}"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.write(f"**Patient:** {appt['patient_name']}")
+                    st.write(f"**Phone:** {appt['patient_phone']}")
+                    st.write(f"**Email:** {appt['patient_email']}")
+                    st.write(f"**Reason:** {appt.get('reason', 'N/A')}")
+                with c2:
+                    st.write(f"**Doctor:** {appt['doctor']}")
+                    st.write(f"**Hospital:** {appt['hospital']}")
+                    st.write(f"**Date:** {appt['date']} at {appt['time']}")
+                    st.write(f"**Booked At:** {appt['booked_at']}")
+        st.write("---")
+
+    # Emergency protocol
+    st.subheader("📋 Emergency Protocol")
+    st.info("""
+**When a HIGH-RISK patient is identified:**
+1. Immediately contact the nearest 24/7 specialist above
+2. Verify patient GPS location and share with care team
+3. Dial 108 for ambulance dispatch
+4. Alert hospital emergency ward before patient arrives
+5. Record all vitals and risk score in patient file
+6. Confirm patient received care within 30 minutes
+    """)
+
+    if st.session_state.prediction_history:
+        st.write("---")
+        st.subheader("📋 Recent Patient Predictions (This Session)")
+        for idx, pred in enumerate(reversed(st.session_state.prediction_history[-10:])):
+            is_emergency = pred.get('risk', 0) >= 50
+            icon = "🚨" if is_emergency else "✅"
+            with st.expander(
+                    f"{icon} {pred.get('name', 'Unknown')} — Risk: {pred.get('risk', 0):.1f}% — {pred.get('timestamp', 'N/A')}"):
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.write(f"**Age:** {pred.get('age', 'N/A')}")
+                    st.write(f"**Gender:** {pred.get('gender', 'N/A')}")
+                with col_b:
+                    st.write(f"**Risk Level:** {pred.get('risk', 0):.1f}%")
+                    st.write(f"**Result:** {pred.get('result', 'N/A')}")
+                if is_emergency:
+                    st.error("⚠️ HIGH RISK — Emergency consultation was triggered!")
+    else:
+        st.info("No patient predictions recorded in this session yet.")
+
+
+# =========================
+# DASHBOARD PAGE
+# =========================
+def dashboard_page():
+    st.set_page_config(page_title="Heart Disease Predictor - Dashboard", layout="wide")
+    st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
+    # Header
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col1:
+        st.image("https://img.freepik.com/free-vector/doctor-character-background_1270-84.jpg", width=120)
+    with col2:
+        st.markdown(
+            "<h1 style='text-align:center;font-size:38px;'>Heart Disease Predictor Using Machine Learning</h1>",
+            unsafe_allow_html=True
+        )
+    with col3:
+        st.image("https://img.freepik.com/free-vector/doctor-character-background_1270-84.jpg", width=120)
+
+    # User info and logout
+    col_left, col_middle, col_right = st.columns([2, 2, 1])
+    with col_left:
+        st.markdown(f"**👋 Welcome, {st.session_state.username}!**")
+    with col_middle:
+        # Live Location Display (Always Visible)
+        location_widget = """
+        <div style='background-color:#4ECDC4; color:white; padding:8px; border-radius:5px; text-align:center; font-size:14px;'>
+            <div id="dash-location">📍 Getting location...</div>
+            <script>
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(function(pos) {
+                    document.getElementById("dash-location").innerHTML = 
+                        "📍 " + pos.coords.latitude.toFixed(4) + ", " + pos.coords.longitude.toFixed(4);
+                });
+            }
+            </script>
+        </div>
+        """
+        components.html(location_widget, height=45)
+    with col_right:
+        if st.button("🚪 Logout", use_container_width=True):
+            st.session_state.logged_in = False
+            st.session_state.username = ""
+            st.session_state.predicted = False
+            st.session_state.selected_role = None
+            st.rerun()
+
+    # Back to role selection
+    if st.button("⬅️ Back to Role Selection", key="back_to_role"):
+        st.session_state.selected_role = None
+        st.rerun()
+
+    st.write("---")
+
+    # Dashboard Stats
+    st.subheader("📊 Dashboard Overview")
+
+    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+
+    with metric_col1:
+        st.metric(
+            label="Total Predictions",
+            value=len(st.session_state.prediction_history),
+            delta="Active Session"
+        )
+
+    with metric_col2:
+        high_risk = sum(1 for p in st.session_state.prediction_history if p.get('risk', 0) > 50)
+        st.metric(
+            label="High Risk Cases",
+            value=high_risk,
+            delta=f"{high_risk}/{len(st.session_state.prediction_history)}" if st.session_state.prediction_history else "0/0"
+        )
+
+    with metric_col3:
+        st.metric(
+            label="Current User",
+            value=st.session_state.username.upper(),
+            delta="Logged In"
+        )
+
+    with metric_col4:
+        emergency_status = "🚨 ALERT" if st.session_state.emergency_triggered else "✅ Normal"
+        st.metric(
+            label="Emergency Status",
+            value=emergency_status,
+            delta="High Risk" if st.session_state.emergency_triggered else "Operational"
+        )
+
+    st.write("---")
+
+    # Recent Predictions
+    if st.session_state.prediction_history:
+        st.subheader("📋 Recent Predictions")
+
+        for idx, pred in enumerate(reversed(st.session_state.prediction_history[-5:])):
+            is_emergency = pred.get('risk', 0) >= 50
+            title_prefix = "🚨 EMERGENCY - " if is_emergency else "🔍 "
+
+            with st.expander(
+                    f"{title_prefix}Prediction #{len(st.session_state.prediction_history) - idx} - {pred.get('name', 'Unknown')} ({pred.get('timestamp', 'N/A')})"):
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    risk_color = "🔴" if is_emergency else "🟢"
+                    st.write(f"**Risk Level:** {risk_color} {pred.get('risk', 0):.1f}%")
+                    st.write(f"**Result:** {pred.get('result', 'N/A')}")
+                with col_b:
+                    st.write(f"**Age:** {pred.get('age', 'N/A')}")
+                    st.write(f"**Gender:** {pred.get('gender', 'N/A')}")
+
+                if is_emergency:
+                    st.error("⚠️ HIGH RISK - Emergency consultation recommended!")
+
+        st.write("---")
+
+
+# =========================
+# MAIN PREDICTOR (UPDATED WITH GEMINI)
+# =========================
+def predictor_page():
+    # PERMANENT LOCATION DISPLAY
+    st.markdown("### 📍 Your Current Location")
+
+    location_display_html = """
+    <div style='background-color:#17a2b8; color:white; padding:20px; border-radius:10px; margin:15px 0; text-align:center;'>
+        <h3 style='color:white; margin-top:0;'>🌐 Live GPS Location</h3>
+        <div id="main-location-status" style='font-size:18px; margin:15px 0;'>
+            🔄 Getting your location...
+        </div>
+        <div id="main-location-coords" style='font-size:16px; background-color:rgba(0,0,0,0.2); padding:10px; border-radius:5px; margin:10px 0;'>
+            Waiting for GPS...
+        </div>
+        <div id="main-location-map" style='margin-top:10px;'>
+        </div>
+        <script>
+        function getMainLocation() {
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(showMainPosition, showMainError);
+            } else {
+                document.getElementById("main-location-status").innerHTML = "❌ Geolocation not supported";
+            }
+        }
+
+        function showMainPosition(position) {
+            var lat = position.coords.latitude.toFixed(6);
+            var lon = position.coords.longitude.toFixed(6);
+            var accuracy = position.coords.accuracy.toFixed(0);
+
+            document.getElementById("main-location-status").innerHTML = "✅ Location Acquired Successfully!";
+            document.getElementById("main-location-coords").innerHTML = 
+                "<strong>Latitude:</strong> " + lat + "<br>" +
+                "<strong>Longitude:</strong> " + lon + "<br>" +
+                "<strong>Accuracy:</strong> ±" + accuracy + " meters";
+
+            var mapUrl = "https://www.google.com/maps?q=" + lat + "," + lon;
+            document.getElementById("main-location-map").innerHTML = 
+                "<a href='" + mapUrl + "' target='_blank' style='background-color:#28a745; color:white; padding:10px 20px; text-decoration:none; border-radius:5px; font-weight:bold; display:inline-block;'>" +
+                "📍 View on Google Maps</a>";
+        }
+
+        function showMainError(error) {
+            var errorMsg = "";
+            switch(error.code) {
+                case error.PERMISSION_DENIED:
+                    errorMsg = "❌ Location access denied. Please enable location in your browser.";
+                    break;
+                case error.POSITION_UNAVAILABLE:
+                    errorMsg = "❌ Location information unavailable.";
+                    break;
+                case error.TIMEOUT:
+                    errorMsg = "❌ Request timed out.";
+                    break;
+                default:
+                    errorMsg = "❌ Unknown error.";
+                    break;
+            }
+            document.getElementById("main-location-status").innerHTML = errorMsg;
+        }
+
+        getMainLocation();
+        setInterval(getMainLocation, 10000);
+        </script>
+    </div>
+    """
+
+    components.html(location_display_html, height=250)
+    st.write("---")
+
+    # INPUT FORM
+    with st.form("user_form"):
+        name = st.text_input("👤 Name", "Mahesh")
+        email = st.text_input("📧 Email", "example@gmail.com")
+
+        st.subheader("📝 Patient Medical Inputs")
+        c1, c2 = st.columns(2)
+
+        with c1:
+            age = st.number_input("Age", 1, 120, 38)
+            sex = st.selectbox("Gender", ["Male", "Female"])
+            cp = st.selectbox("Chest Pain Type", [0, 1, 2, 3])
+            trestbps = st.number_input("Resting Blood Pressure", 130)
+            chol = st.number_input("Cholesterol Level", 150)
+            fbs = st.selectbox("Fasting Blood Sugar > 120?", [0, 1])
+
+        with c2:
+            restecg = st.selectbox("Resting ECG", ["Normal", "ST-T wave abnormality", "Left ventricular hypertrophy"])
+            thalach = st.number_input("Maximum Heart Rate", 80)
+            exang = st.selectbox("Exercise Induced Angina?", [0, 1])
+            oldpeak = st.number_input("Old Peak", 2.0)
+            slope = st.selectbox("Slope", [0, 1, 2])
+            ca = st.selectbox("Major Vessels (0-3)", [0, 1, 2, 3])
+            thal = st.selectbox("Thal Type", ["Normal", "Fixed Defect", "Reversible Defect"])
+
+        st.subheader("📷 Capture Patient Image")
+        img = st.camera_input("Take a picture")
+
+        submitted = st.form_submit_button("🔍 Predict")
+
+    # PREDICTION + PDF + EMAIL
+    if submitted:
+        sex_val = 1 if sex == "Male" else 0
+        restecg_val = {"Normal": 0, "ST-T wave abnormality": 1, "Left ventricular hypertrophy": 2}[restecg]
+        thal_val = {"Normal": 0, "Fixed Defect": 1, "Reversible Defect": 2}[thal]
+
+        input_data = np.array([
+            age, sex_val, cp, trestbps, chol, fbs,
+            restecg_val, thalach, exang, oldpeak,
+            slope, ca, thal_val
+        ]).reshape(1, -1)
+
+        prob = ml_model.predict_proba(input_data)[0][1]  # FIXED: Use ml_model instead of model
+        pred = ml_model.predict(input_data)[0]  # FIXED: Use ml_model instead of model
+
+        result_text = "No heart disease detected." if pred == 0 else "Heart disease detected."
+
+        st.markdown(f"### 🧾 Overall Result: **{prob * 100:.1f}%** chance of heart disease")
+
+        # Check for emergency case (high risk)
+        if prob >= 0.5:
+            st.error(result_text)
+            st.session_state.emergency_triggered = True
+
+            # EMERGENCY ALERT
+            st.markdown("---")
+            st.markdown("## 🚨 EMERGENCY ALERT - HIGH RISK DETECTED!")
+
+            st.error("**⚠️ IMMEDIATE MEDICAL ATTENTION REQUIRED**")
+
+            # Live Location Section
+            st.markdown("### 📍 Your Current Location")
+
+            # Display Live Location with JavaScript
+            location_html = """
+            <div style='background-color:#ff4444; color:white; padding:20px; border-radius:10px; margin:15px 0; text-align:center;'>
+                <h3 style='color:white; margin-top:0;'>🌐 Live Location Tracker</h3>
+                <div id="location-status" style='font-size:18px; margin:15px 0;'>
+                    🔄 Getting your location...
+                </div>
+                <div id="location-coords" style='font-size:16px; background-color:rgba(0,0,0,0.2); padding:10px; border-radius:5px; margin:10px 0;'>
+                    Waiting for GPS...
+                </div>
+                <div id="location-map-link" style='margin-top:10px;'>
+                </div>
+                <script>
+                function getLocation() {
+                    if (navigator.geolocation) {
+                        navigator.geolocation.getCurrentPosition(showPosition, showError);
+                    } else {
+                        document.getElementById("location-status").innerHTML = "❌ Geolocation not supported";
+                    }
+                }
+
+                function showPosition(position) {
+                    var lat = position.coords.latitude.toFixed(6);
+                    var lon = position.coords.longitude.toFixed(6);
+                    var accuracy = position.coords.accuracy.toFixed(0);
+
+                    document.getElementById("location-status").innerHTML = "✅ Location Acquired Successfully!";
+                    document.getElementById("location-coords").innerHTML = 
+                        "<strong>Latitude:</strong> " + lat + "<br>" +
+                        "<strong>Longitude:</strong> " + lon + "<br>" +
+                        "<strong>Accuracy:</strong> ±" + accuracy + " meters";
+
+                    var mapUrl = "https://www.google.com/maps?q=" + lat + "," + lon;
+                    document.getElementById("location-map-link").innerHTML = 
+                        "<a href='" + mapUrl + "' target='_blank' style='background-color:#28a745; color:white; padding:10px 20px; text-decoration:none; border-radius:5px; font-weight:bold; display:inline-block;'>" +
+                        "📍 Open My Location in Google Maps</a><br><br>" +
+                        "<div style='font-size:14px; margin-top:10px;'>Share this link with emergency services and family</div>";
+                }
+
+                function showError(error) {
+                    var errorMsg = "";
+                    switch(error.code) {
+                        case error.PERMISSION_DENIED:
+                            errorMsg = "❌ Location access denied. Please enable location in your browser.";
+                            break;
+                        case error.POSITION_UNAVAILABLE:
+                            errorMsg = "❌ Location information unavailable.";
+                            break;
+                        case error.TIMEOUT:
+                            errorMsg = "❌ Request timed out. Please try again.";
+                            break;
+                        default:
+                            errorMsg = "❌ Unknown error occurred.";
+                            break;
+                    }
+                    document.getElementById("location-status").innerHTML = errorMsg;
+                    document.getElementById("location-coords").innerHTML = 
+                        "Please enable location access in your browser settings";
+                }
+
+                // Get location immediately
+                getLocation();
+
+                // Update location every 5 seconds
+                setInterval(getLocation, 5000);
+                </script>
+            </div>
+            """
+
+            components.html(location_html, height=280)
+
+            # Note about location sharing
+            st.markdown("""
+            <div style='background-color:#fff3cd; padding:10px; border-radius:5px; border-left:4px solid #ffc107;'>
+                <strong>💡 How to share your location:</strong>
+                <ul>
+                    <li>Click the "Open My Location in Google Maps" button above</li>
+                    <li>Share the Google Maps link with doctors and emergency contacts</li>
+                    <li>Call emergency services (108) and read your coordinates to them</li>
+                    <li>Take a screenshot and send to family members</li>
+                </ul>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Emergency Doctor Details
+            st.markdown("---")
+            st.markdown("### 🏥 EMERGENCY CARDIAC SPECIALISTS - CONTACT IMMEDIATELY")
+
+            for idx, doctor in enumerate(EMERGENCY_DOCTORS):
+                with st.expander(f"🩺 {doctor['name']} - {doctor['specialization']}", expanded=(idx == 0)):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown(f"**🏥 Hospital:** {doctor['hospital']}")
+                        st.markdown(f"**📞 Phone:** {doctor['phone']}")
+                        st.markdown(f"**📧 Email:** {doctor['email']}")
+                    with col2:
+                        st.markdown(f"**📍 Address:** {doctor['address']}")
+                        st.markdown(f"**⏰ Availability:** {doctor['availability']}")
+                        st.markdown(f"**🗺️ [View on Map]({doctor['maps_link']})**")
+
+            # Emergency Instructions
+            st.markdown("---")
+            st.warning("""
+### ⚠️ IMMEDIATE ACTIONS TO TAKE:
+1. **Stay Calm** - Don't panic, help is available
+2. **Call Emergency** - Dial 108 (India) or your local emergency number
+3. **Contact Doctor** - Call one of the specialists listed above
+4. **Share Location** - Share your current location with emergency contacts
+5. **Avoid Exertion** - Sit or lie down, avoid physical activity
+6. **Take Medication** - If prescribed, take your emergency medication
+7. **Someone Nearby** - Don't stay alone, call family/friends immediately
+            """)
+
+            # Send emergency email
+            try:
+                emergency_msg = EmailMessage()
+                emergency_msg["Subject"] = "🚨 EMERGENCY: High Heart Disease Risk Detected"
+                emergency_msg["From"] = SENDER_EMAIL
+                emergency_msg["To"] = email
+
+                emergency_body = (
+                    f"URGENT - EMERGENCY ALERT\n\n"
+                    f"Patient: {name}\n"
+                    f"Heart Disease Risk: {prob * 100:.1f}%\n"
+                    f"Status: HIGH RISK - IMMEDIATE MEDICAL ATTENTION REQUIRED\n\n"
+                    f"EMERGENCY CONTACTS:\n\n"
+                )
+
+                for doctor in EMERGENCY_DOCTORS:
+                    emergency_body += (
+                        f"{doctor['name']} - {doctor['specialization']}\n"
+                        f"Hospital: {doctor['hospital']}\n"
+                        f"Phone: {doctor['phone']}\n"
+                        f"Email: {doctor['email']}\n"
+                        f"Address: {doctor['address']}\n"
+                        f"Maps: {doctor['maps_link']}\n\n"
+                    )
+
+                emergency_body += (
+                    f"IMMEDIATE ACTIONS:\n"
+                    f"1. Call emergency services: 108\n"
+                    f"2. Contact a cardiac specialist immediately\n"
+                    f"3. Share your location with emergency contacts\n"
+                    f"4. Do not ignore symptoms\n\n"
+                    f"This is an automated emergency alert from Heart Disease Predictor System.\n"
+                )
+
+                emergency_msg.set_content(clean_text(emergency_body))
+
+                with smtplib.SMTP("smtp.gmail.com", 587) as smtp:
+                    smtp.starttls()
+                    smtp.login(SENDER_EMAIL, SENDER_APP_PASSWORD)
+                    smtp.send_message(emergency_msg)
+
+                st.success("✅ Emergency alert email sent to your address!")
+            except Exception as e:
+                st.warning("⚠️ Could not send emergency email. Please contact doctors manually.")
+        else:
+            st.success(result_text)
+
+        data_dict = {
+            "Age": age, "Gender": sex, "Chest Pain": cp,
+            "Blood Pressure": trestbps, "Cholesterol": chol,
+            "FBS > 120": fbs, "ECG": restecg,
+            "Max Heart Rate": thalach, "Exercise Angina": exang,
+            "Old Peak": oldpeak, "Slope": slope,
+            "Major Vessels": ca, "Thal": thal
+        }
+        st.table([[k, v] for k, v in data_dict.items()])
+
+        image_path = None
+        if img:
+            image_path = "patient_image.jpg"
+            with open(image_path, "wb") as f:
+                f.write(img.getbuffer())
+            st.image(img, caption="Captured Image", use_column_width=True)
+
+        # ---------- PDF ----------
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", "B", 16)
+        pdf.cell(200, 10, "Heart Disease Medical Report", ln=True, align="C")
+        pdf.set_font("Arial", size=12)
+
+        pdf.cell(200, 8, clean_text(f"Name: {name}"), ln=True)
+        pdf.cell(200, 8, clean_text(f"Email: {email}"), ln=True)
+        pdf.cell(200, 8, clean_text(f"Risk: {prob * 100:.1f}%"), ln=True)
+        pdf.multi_cell(0, 8, clean_text(f"Result: {result_text}"))
+
+        pdf.ln(3)
+        pdf.cell(200, 8, "Diet & Lifestyle Guidance:", ln=True)
+
+        guidance_text = (
+            "- Eat protein-rich foods (eggs, dal, fish, milk)\n"
+            "- Reduce oil, salt, and sugar\n"
+            "- Eat fruits and vegetables daily\n"
+            "- Walk at least 30 minutes daily\n"
+            "- Avoid smoking and alcohol"
+        )
+        pdf.multi_cell(0, 8, clean_text(guidance_text))
+
+        if image_path:
+            pdf.image(image_path, x=10, w=70)
+
+        pdf_path = "heart_report.pdf"
+        pdf.output(pdf_path)
+
+        with open(pdf_path, "rb") as f:
+            st.download_button("📥 Download Report (PDF)", f, "heart_report.pdf")
+
+        # ---------- EMAIL (DETAILED CONTENT) ----------
+        msg = EmailMessage()
+        msg["Subject"] = "Heart Disease Prediction – Medical Report"
+        msg["From"] = SENDER_EMAIL
+        msg["To"] = email
+
+        email_body = (
+            f"Dear {name},\n\n"
+            f"Thank you for using the Heart Disease Predictor System.\n\n"
+            f"Health Assessment Summary:\n"
+            f"- Age: {age}\n"
+            f"- Gender: {sex}\n"
+            f"- Heart Disease Risk: {prob * 100:.1f}%\n"
+            f"- Result: {result_text}\n\n"
+            f"Health & Lifestyle Guidance:\n"
+            f"- Eat protein-rich foods (eggs, dal, fish, milk)\n"
+            f"- Reduce oil, salt, and sugar\n"
+            f"- Eat fruits and vegetables daily\n"
+            f"- Walk at least 30 minutes every day\n"
+            f"- Avoid smoking and alcohol\n\n"
+            f"Please find attached:\n"
+            f"- Your detailed medical report (PDF)\n"
+            f"- Captured patient image (if provided)\n\n"
+            f"Disclaimer:\n"
+            f"This report is generated using a machine learning model and is for informational purposes only.\n"
+            f"Please consult a certified doctor for medical decisions.\n\n"
+            f"Regards,\n"
+            f"Heart Disease Predictor App"
+        )
+
+        msg.set_content(clean_text(email_body))
+
+        with open(pdf_path, "rb") as f:
+            msg.add_attachment(f.read(), maintype="application", subtype="pdf", filename="heart_report.pdf")
+
+        if image_path:
+            with open(image_path, "rb") as f:
+                msg.add_attachment(f.read(), maintype="image", subtype="jpeg", filename="patient_image.jpg")
+
+        with smtplib.SMTP("smtp.gmail.com", 587) as smtp:
+            smtp.starttls()
+            smtp.login(SENDER_EMAIL, SENDER_APP_PASSWORD)
+            smtp.send_message(msg)
+
+        st.success("📧 Email with detailed content, PDF & image sent successfully")
+
+        st.session_state.predicted = True
+        st.session_state.context = (
+            f"Age: {age}\n"
+            f"Gender: {sex}\n"
+            f"Blood Pressure: {trestbps}\n"
+            f"Cholesterol: {chol}\n"
+            f"Risk: {prob * 100:.1f}%"
+        )
+
+        # Add to history
+        st.session_state.prediction_history.append({
+            "name": name,
+            "age": age,
+            "gender": sex,
+            "risk": prob * 100,
+            "result": result_text,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "is_emergency": prob >= 0.5
+        })
+
+    # AI VOICE AGENT - FIXED WITH AUTO-DETECTION AND DIAGNOSTICS
+    if st.session_state.predicted:
+        st.write("---")
+        st.subheader("🎤 Talk to AI Health Assistant")
+
+        # Diagnostic tool to help troubleshoot API issues
+        with st.expander("🔧 Troubleshooting - Check Available Models"):
+            if st.button("Test Gemini API Connection"):
+                try:
+                    st.write("**Testing Gemini API...**")
+                    st.write(f"**API Key (first 10 chars):** {GEMINI_API_KEY[:10]}...")
+
+                    # Try to list ALL models (not just generateContent)
+                    try:
+                        st.write("\n**Fetching all available models...**")
+                        all_models = list(genai.list_models())
+
+                        if all_models:
+                            st.success(f"✅ API key is valid! Found {len(all_models)} total models")
+
+                            # Show models that support generateContent
+                            generate_models = [m for m in all_models if
+                                               'generateContent' in m.supported_generation_methods]
+
+                            if generate_models:
+                                st.success(f"✅ Found {len(generate_models)} models supporting generateContent:")
+                                for model in generate_models:
+                                    st.code(f"{model.name} - {model.display_name}")
+
+                                # Try to use the first available model
+                                st.write("\n**Testing the first available model...**")
+                                first_model_name = generate_models[0].name
+                                try:
+                                    test_model = genai.GenerativeModel(first_model_name)
+                                    test_response = test_model.generate_content("Say hello in one word")
+                                    st.success(f"✅ **{first_model_name}** works! Response: {test_response.text}")
+                                    st.info(f"💡 **Solution:** The app should use model name: `{first_model_name}`")
+                                except Exception as test_error:
+                                    st.error(f"❌ Testing failed: {test_error}")
+                            else:
+                                st.error("❌ No models support 'generateContent' method")
+                                st.write("\n**All available models:**")
+                                for model in all_models:
+                                    st.write(f"- {model.name}: {', '.join(model.supported_generation_methods)}")
+                        else:
+                            st.error("❌ No models found. Your API key might not be activated.")
+                            st.info("""
+**Steps to fix:**
+1. Go to https://aistudio.google.com/app/apikey
+2. Create a NEW API key (don't reuse old one)
+3. Make sure you're logged into the correct Google account
+4. Wait 1-2 minutes for the key to activate
+5. Replace the key in the app.py file (line 19)
+                            """)
+
+                    except Exception as list_error:
+                        st.error(f"❌ Cannot list models: {list_error}")
+                        st.warning("""
+**This error usually means:**
+- API key is invalid or expired
+- Google AI Studio API is not enabled for your account
+- Network/firewall blocking the connection
+
+**Try this:**
+1. Generate a completely new API key at https://aistudio.google.com/app/apikey
+2. Make sure you copy the ENTIRE key (starts with 'AIza')
+3. Replace it in app.py on line 19
+                        """)
+
+                except Exception as e:
+                    st.error(f"❌ Diagnostic failed: {e}")
+                    st.info("""
+**Quick fixes:**
+1. Get a fresh API key: https://aistudio.google.com/app/apikey
+2. Make sure you're using a personal Google account (not workspace/school)
+3. Try accessing https://aistudio.google.com/ in your browser first
+4. Check if you can see the Gemini interface there
+                    """)
+
+        patient_audio = st.audio_input("Speak your question")
+
+        if patient_audio:
+            audio_path = "patient_voice.wav"
+            with open(audio_path, "wb") as f:
+                f.write(patient_audio.getbuffer())
+
+            AudioSegment.from_file(audio_path).export(audio_path, format="wav")
+
+            r = sr.Recognizer()
+            with sr.AudioFile(audio_path) as source:
+                audio_data = r.record(source)
+
+            try:
+                patient_text = r.recognize_google(audio_data)
+            except:
+                st.error("Could not understand audio")
+                st.stop()
+
+            st.write(f"You said: {patient_text}")
+
+            # FIXED: Dynamically find and use ANY available Gemini model
+            try:
+                # First, get list of all available models
+                available_models = list(genai.list_models())
+                generate_models = [m for m in available_models if 'generateContent' in m.supported_generation_methods]
+
+                if not generate_models:
+                    raise Exception(
+                        "No Gemini models available with your API key. Please create a new API key at https://aistudio.google.com/app/apikey")
+
+                # Use the first available model
+                model_to_use = generate_models[0].name
+                st.info(f"🤖 Using model: {model_to_use}")
+
+                ai_model = genai.GenerativeModel(model_to_use)
+
+                # Generate response
+                prompt = clean_text(
+                    f"You are a caring medical assistant. Based on this patient data:\n{st.session_state.context}\n\n"
+                    f"Patient Question: {patient_text}\n\n"
+                    f"Provide a helpful, empathetic response in 2-3 sentences."
+                )
+                response = ai_model.generate_content(prompt)
+                reply = response.text
+
+                st.write(f"**AI Response:** {reply}")
+
+                gTTS(clean_text(reply), lang="en").save("ai_reply.mp3")
+                st.audio("ai_reply.mp3")
+
+            except Exception as e:
+                st.error(f"❌ AI Assistant Error: {str(e)}")
+                st.warning("""
+**The AI Voice Assistant is currently unavailable.**
+
+**Most Common Issue:** Your Gemini API key is not working.
+
+**Solution:**
+1. Go to https://aistudio.google.com/app/apikey
+2. Create a **NEW** API key (don't reuse the old one)
+3. Copy the ENTIRE key (starts with "AIza")
+4. Replace it in app.py on line 19:
+   ```python
+   GEMINI_API_KEY = "YOUR_NEW_KEY_HERE"
+   ```
+5. Restart the app
+
+**Alternative:** All other features (prediction, PDF, email, emergency alerts) work fine without the AI assistant.
+                """)
+
+    st.caption("⚠️ AI guidance is for informational purposes only.")
+
+
+# =========================
+# MAIN APP ROUTER
+# =========================
+def main():
+    if not st.session_state.logged_in:
+        # Step 1: Login
+        login_page()
+    elif st.session_state.selected_role is None:
+        # Step 2: Role Selection (NEW)
+        role_selection_page()
+    elif st.session_state.selected_role == "doctor":
+        # Step 3a: Doctor Panel
+        doctor_panel_page()
+    else:
+        # Step 3b: Patient — show dashboard + predictor (original flow)
+        dashboard_page()
+        st.write("---")
+        st.subheader("🏥 New Prediction")
+        predictor_page()
+
+
+if __name__ == "__main__":
+    main()
