@@ -1,0 +1,139 @@
+import streamlit as st
+import cohere
+from pypdf import PdfReader
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
+# ─────────────────────────────────────────────
+# Page config
+# ─────────────────────────────────────────────
+st.set_page_config(page_title="AI Hiring Assistant", page_icon="💼", layout="centered")
+st.title("💼 AI Hiring Assistant (LLM + RAG + ML)")
+
+# ─────────────────────────────────────────────
+# API Key — sidebar input (never hardcode keys)
+# ─────────────────────────────────────────────
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    api_key = st.text_input(
+        "cohere_9x2AhwyVjG97mIXIoEbZQC6fFRpcwDMlwahpJxwA3F5CkE",
+        type="password",
+        placeholder="Paste your Cohere API key here",
+        help="Get your key from https://dashboard.cohere.com/api-keys",
+    )
+    st.markdown("---")
+    st.caption("Your key is never stored or sent anywhere except Cohere's API.")
+
+# ─────────────────────────────────────────────
+# Inputs
+# ─────────────────────────────────────────────
+uploaded_file = st.file_uploader("📎 Upload Resume (PDF)", type="pdf")
+job_desc = st.text_area("📋 Paste Job Description", height=180)
+
+# ─────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────
+def extract_text_from_pdf(file) -> str:
+    """Extract all text from an uploaded PDF file."""
+    reader = PdfReader(file)
+    text = ""
+    for page in reader.pages:
+        page_text = page.extract_text()
+        if page_text:
+            text += page_text + "\n"
+    return text.strip()
+
+
+def compute_similarity(text_a: str, text_b: str) -> float:
+    """Return TF-IDF cosine similarity (0–100) between two texts."""
+    vectorizer = TfidfVectorizer(stop_words="english")
+    vectors = vectorizer.fit_transform([text_a, text_b])
+    score = cosine_similarity(vectors[0:1], vectors[1:2])[0][0]
+    return round(score * 100, 2)
+
+
+def analyse_with_cohere(api_key: str, job_desc: str, resume_context: str) -> str:
+    """Call Cohere chat API and return the analysis text."""
+    # Cohere SDK v5+ uses ClientV2 with the messages-style chat API
+    co = cohere.ClientV2(api_key=api_key)
+
+    prompt = f"""You are an expert AI hiring assistant.
+
+Job Description:
+{job_desc}
+
+Candidate Resume (excerpt):
+{resume_context}
+
+Please analyse the candidate and provide a structured report covering:
+1. **Match Evaluation** — how well does the candidate align with the role?
+2. **Key Strengths** — what does the candidate bring that fits well?
+3. **Missing Skills / Gaps** — what important requirements are absent?
+4. **Final Recommendation** — hire / consider / pass, and why.
+
+Be concise, specific, and professional.
+"""
+
+    response = co.chat(
+        model="command-r-08-2024",           # use command-r or command-r-plus
+        messages=[
+            {"role": "user", "content": prompt}
+        ],
+    )
+
+    # Cohere v5 response structure: response.message.content[0].text
+    return response.message.content[0].text
+
+
+# ─────────────────────────────────────────────
+# Main logic
+# ─────────────────────────────────────────────
+if uploaded_file and job_desc:
+    if not api_key:
+        st.warning("⚠️ Please enter your Cohere API key in the sidebar to continue.")
+        st.stop()
+
+    with st.spinner("Extracting text from resume…"):
+        try:
+            resume_text = extract_text_from_pdf(uploaded_file)
+        except Exception as e:
+            st.error(f"❌ Could not read the PDF: {e}")
+            st.stop()
+
+    if not resume_text:
+        st.error("❌ No readable text found in the PDF. Try a text-based PDF instead of a scanned image.")
+        st.stop()
+
+    # ── ML: Similarity score ──────────────────
+    score = compute_similarity(job_desc, resume_text)
+
+    st.subheader("📊 Match Score")
+    color = "green" if score >= 50 else "orange" if score >= 25 else "red"
+    st.markdown(f"<h2 style='color:{color}'>{score}%</h2>", unsafe_allow_html=True)
+    st.progress(min(int(score), 100))
+
+    # ── RAG: retrieved context ────────────────
+    context = resume_text[:1500]  # top ~1500 chars as retrieved chunk
+
+    with st.expander("📄 Retrieved Resume Context (RAG chunk)", expanded=False):
+        st.text(context[:600] + ("…" if len(context) > 600 else ""))
+
+    # ── LLM: Cohere analysis ──────────────────
+    st.subheader("🤖 AI Analysis")
+    with st.spinner("Asking Cohere to analyse the candidate…"):
+        try:
+            result = analyse_with_cohere(api_key, job_desc, context)
+            st.markdown(result)
+        except cohere.errors.UnauthorizedError:
+            st.error("❌ Invalid API key. Please check the key you entered in the sidebar.")
+        except cohere.errors.TooManyRequestsError:
+            st.error("❌ Rate limit hit. Wait a moment and try again.")
+        except Exception as e:
+            st.error(f"❌ Cohere API error: {e}")
+
+elif uploaded_file and not job_desc:
+    st.info("ℹ️ Please paste the job description above to continue.")
+elif job_desc and not uploaded_file:
+    st.info("ℹ️ Please upload the candidate's resume (PDF) to continue.")
+else:
+    st.info("👆 Upload a resume and paste a job description to get started.")
